@@ -3,11 +3,12 @@ package api
 import (
 	// "encoding/json"
 	"encoding/json"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type job struct {
@@ -22,6 +23,7 @@ func ListJobs(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit := 10
 		offset := 0
+		status := ""
 
 		if limitString := r.URL.Query().Get("limit"); limitString != "" {
 
@@ -47,6 +49,17 @@ func ListJobs(pool *pgxpool.Pool) http.HandlerFunc {
 			offset = value
 		}
 
+		if statusString := r.URL.Query().Get("status"); statusString != "" {
+			switch statusString {
+			case "queued", "running", "retry_wait", "succeeded", "dead":
+
+			default:
+				http.Error(w, "Invalid status-type", http.StatusBadRequest)
+				return
+			}
+			status = statusString
+		}
+
 		if limit > 100 {
 			limit = 100
 		}
@@ -54,8 +67,9 @@ func ListJobs(pool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pool.Query(r.Context(),
 			`SELECT id, job_type, payload, status, created_at
 			FROM jobs
+			WHERE ($1 = '' OR status = $1)
 			ORDER BY created_at DESC, id DESC
-			LIMIT $1 OFFSET $2; `, limit, offset,
+			LIMIT $2 OFFSET $3; `, status, limit, offset,
 		)
 
 		if err != nil {
