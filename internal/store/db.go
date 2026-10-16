@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -18,7 +19,7 @@ func NewPool (ctx context.Context) (*pgxpool.Pool, error){
 	config, err := pgxpool.ParseConfig(databaseUrl)
 
 	if err != nil{
-		fmt.Errorf("parse database config: %w", err)
+		log.Print("parse database config: %w", err)
 	}
 	
 	config.MaxConns = 10
