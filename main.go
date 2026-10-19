@@ -30,6 +30,7 @@ func main() {
 	router.HandleFunc("POST /jobs", api.CreateJob(pool))
 	router.HandleFunc("GET /jobs/{id}", api.GetJob(pool))
 	router.HandleFunc("GET /jobs", api.ListJobs(pool))
+	router.HandleFunc("POST /claim", api.ClaimJob(pool))
 
 	log.Println("Forgqueue is listening on port :8080")
 	err = http.ListenAndServe(":8080", router)
