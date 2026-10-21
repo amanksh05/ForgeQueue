@@ -21,7 +21,10 @@ type Job struct {
 	Status         string          `json:"status"`
 	CreatedAt      time.Time       `json:"created_at"`
 	ClaimToken     uuid.UUID       `json:"claim_token"`
+	CompletedAt    time.Time       `json:"completed_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 	LeaseExpiresAt time.Time       `json:"lease_expires_at"`
+	AttemptCount   int             `json:"attempt_count"`
 }
 
 func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
@@ -35,7 +38,7 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 	defer tx.Rollback(context.Background())
 
 	err = tx.QueryRow(ctx, `
-	SELECT id, job_type, payload, status, created_at
+	SELECT id, job_type, payload, status, created_at, attempt_count
 	FROM jobs
 	WHERE status = 'queued'
 	AND available_at <= NOW()
@@ -48,6 +51,7 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 		&job.Payload,
 		&job.Status,
 		&job.CreatedAt,
+		&job.AttemptCount,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -64,12 +68,14 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 			SET status = 'running'
 			, claim_token = $1
 			, lease_expires_at = NOW() + INTERVAL '30 seconds'
+			, attempt_count = attempt_count + 1
 			WHERE id = $2 AND status = 'queued'
-			RETURNING status, claim_token, lease_expires_at
+			RETURNING status, claim_token, lease_expires_at, attempt_count
 		`, claimToken, job.ID).Scan(
 		&job.Status,
 		&job.ClaimToken,
 		&job.LeaseExpiresAt,
+		&job.AttemptCount,
 	)
 
 	if err != nil {
