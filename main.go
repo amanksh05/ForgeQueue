@@ -9,6 +9,7 @@ import (
 
 	"github.com/amanksh05/forgeQueue/internal/store"
 	"github.com/amanksh05/forgeQueue/internal/api"
+	"github.com/amanksh05/forgeQueue/internal/worker"
 	"github.com/joho/godotenv"
 )
 
@@ -31,6 +32,8 @@ func main() {
 	router.HandleFunc("GET /jobs/{id}", api.GetJob(pool))
 	router.HandleFunc("GET /jobs", api.ListJobs(pool))
 	router.HandleFunc("POST /claim", api.ClaimJob(pool))
+
+	go worker.RunWorker(ctx, pool)
 
 	log.Println("Forgqueue is listening on port :8080")
 	err = http.ListenAndServe(":8080", router)
