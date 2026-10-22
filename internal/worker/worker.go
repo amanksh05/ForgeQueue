@@ -11,8 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func wait(ctx context.Context) bool {
-	timer := time.NewTimer(time.Second)
+const (
+	pollInterval = time.Second
+	maxErrorWait = 30 * time.Second
+)
+
+func wait(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -23,6 +28,7 @@ func wait(ctx context.Context) bool {
 }
 
 func RunWorker(ctx context.Context, pool *pgxpool.Pool) {
+	errorWait := pollInterval
 	for {
 		if ctx.Err() != nil {
 			return
@@ -30,23 +36,37 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool) {
 		job, err := store.ClaimJob(ctx, pool)
 
 		if errors.Is(err, store.ErrorNoJobAvailable) {
-			if !wait(ctx) {
+			errorWait = pollInterval
+			if !wait(ctx, pollInterval) {
 				return
 			}
 			continue
 		}
 		if err != nil {
 			log.Printf("Error claim_job: %v", err)
-			if !wait(ctx) {
+			if !wait(ctx, errorWait) {
 				return
+			}
+			errorWait *= 2
+			if errorWait > maxErrorWait {
+				errorWait = maxErrorWait
 			}
 			continue
 		}
+		errorWait = pollInterval
 
 		log.Printf("Claimed job id=%s type=%s", job.ID, job.Type)
 
-		if err := ExecuteJob(ctx, job); err != nil {
-			log.Printf("Job execution failed: %v", err)
+		if executionErr := ExecuteJob(ctx, job); executionErr != nil {
+			log.Printf("Job execution failed: %v", executionErr)
+			if err := store.FailJob(ctx, pool, job, executionErr); err != nil {
+				log.Printf(
+					"Failed to record job failure: id=%s error=%v",
+					job.ID,
+					err,
+				)
+			}
+
 			continue
 		}
 

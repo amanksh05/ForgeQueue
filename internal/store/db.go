@@ -10,18 +10,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewPool (ctx context.Context) (*pgxpool.Pool, error){
+func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
 	databaseUrl := os.Getenv("DATABASE_URL")
-	if databaseUrl == ""{
+	if databaseUrl == "" {
 		return nil, fmt.Errorf("DATABASE_URL string not set!!")
 	}
 
 	config, err := pgxpool.ParseConfig(databaseUrl)
 
-	if err != nil{
+	if err != nil {
 		log.Print("parse database config: %w", err)
 	}
-	
+
 	config.MaxConns = 10
 	config.MinConns = 1
 
@@ -33,7 +33,7 @@ func NewPool (ctx context.Context) (*pgxpool.Pool, error){
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	if err := pool.Ping(pingCtx); err != nil{
+	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}

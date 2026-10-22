@@ -25,6 +25,7 @@ type Job struct {
 	UpdatedAt      time.Time       `json:"updated_at"`
 	LeaseExpiresAt time.Time       `json:"lease_expires_at"`
 	AttemptCount   int             `json:"attempt_count"`
+	MaxAttempts    int             `json:"max_attempts"`
 }
 
 func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
@@ -38,10 +39,12 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 	defer tx.Rollback(context.Background())
 
 	err = tx.QueryRow(ctx, `
-	SELECT id, job_type, payload, status, created_at, attempt_count
+	SELECT id, job_type, payload, status, created_at, attempt_count, max_attempts
 	FROM jobs
-	WHERE status = 'queued'
-	AND available_at <= NOW()
+	WHERE (
+    (status = 'queued' OR status = 'retry_wait')
+    AND available_at <= NOW()
+)
 	ORDER BY available_at ASC
 	LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -52,6 +55,7 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 		&job.Status,
 		&job.CreatedAt,
 		&job.AttemptCount,
+		&job.MaxAttempts,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -69,7 +73,9 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (Job, error) {
 			, claim_token = $1
 			, lease_expires_at = NOW() + INTERVAL '30 seconds'
 			, attempt_count = attempt_count + 1
-			WHERE id = $2 AND status = 'queued'
+			WHERE id = $2
+  				AND status IN ('queued', 'retry_wait')
+  				AND available_at <= NOW()
 			RETURNING status, claim_token, lease_expires_at, attempt_count
 		`, claimToken, job.ID).Scan(
 		&job.Status,

@@ -10,15 +10,6 @@ import (
 	"github.com/amanksh05/forgeQueue/internal/store"
 )
 
-// type Job struct {
-// 	ID             string          `json:"id"`
-// 	Type           string          `json:"type"`
-// 	Payload        json.RawMessage `json:"payload"`
-// 	Status         string          `json:"status"`
-// 	CreatedAt      time.Time       `json:"created_at"`
-// 	ClaimToken     uuid.UUID       `json:"claim_token"`
-// 	LeaseExpiresAt time.Time       `json:"lease_expires_at"`
-// }
 
 type SleepPayloadStruct struct {
 	DurationSeconds int `json:"duration_seconds"`
