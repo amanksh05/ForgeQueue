@@ -35,7 +35,7 @@ func CreateJob(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		switch request.Type {
-		case "echo", "sleep", "fail_once":
+		case "echo", "sleep", "fail_once" , "fail":
 
 		default:
 			http.Error(w, "Unsupported Job-type", http.StatusBadRequest)

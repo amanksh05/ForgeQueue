@@ -23,6 +23,10 @@ type FailOncePayloadStruct struct {
 	FailOnce bool `json:"fail_once"`
 }
 
+func DispatchFail(job store.Job) error {
+    return fmt.Errorf("intentional failure for job %s", job.ID)
+}
+
 func DispatchEcho(job store.Job) error {
 	var payload EchoPayloadStruct
 	if err := json.Unmarshal(job.Payload, &payload); err != nil {
@@ -87,6 +91,10 @@ func ExecuteJob(ctx context.Context, job store.Job) error {
 
 	case "fail_once":
 		return DispatchFailOnce(job)
+
+	case "fail":
+    	return DispatchFail(job)
+
 	default:
 		return fmt.Errorf("Invalid Job Type!!!")
 	}
