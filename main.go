@@ -3,24 +3,35 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"context"
 	"net/http"
 
-	"github.com/amanksh05/forgeQueue/internal/store"
 	"github.com/amanksh05/forgeQueue/internal/api"
+	"github.com/amanksh05/forgeQueue/internal/store"
 	"github.com/amanksh05/forgeQueue/internal/worker"
 	"github.com/joho/godotenv"
 )
 
 func main() {
 	err := godotenv.Load()
-	if err != nil{
+	if err != nil {
 		log.Println("No .env file found; using environment variables")
 	}
-	ctx := context.Background()
+
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
 	pool, err := store.NewPool(ctx)
-	if err != nil{
+	if err != nil {
 		log.Fatal(err)
 	}
 
@@ -33,15 +44,40 @@ func main() {
 	router.HandleFunc("GET /jobs", api.ListJobs(pool))
 	router.HandleFunc("POST /claim", api.ClaimJob(pool))
 
-	go worker.RunWorker(ctx, pool)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		worker.RunWorker(ctx, pool)
+	}()
 
 	log.Println("Forgqueue is listening on port :8080")
-	err = http.ListenAndServe(":8080", router)
-	if err != nil {
-		log.Fatal("Failed to initiate Forgequeue. ERROR:", err)
-		return
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: router,
+	}
+	go func() {
+		err := server.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+	<-ctx.Done()
+	log.Println("Shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Graceful shutdown failed: %v", err)
 	}
 
+	wg.Wait()
+	log.Println("Worker stopped")
 }
 
 func health(w http.ResponseWriter, r *http.Request) {
