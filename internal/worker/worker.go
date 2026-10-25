@@ -33,6 +33,23 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool) {
 		if ctx.Err() != nil {
 			return
 		}
+
+		err := store.RecoverExpiredJobs(ctx, pool)
+
+		if err != nil {
+			log.Printf("Failed to recover expired jobs: %v", err)
+
+			if !wait(ctx, errorWait) {
+				return
+			}
+
+			errorWait *= 2
+			if errorWait > maxErrorWait {
+				errorWait = maxErrorWait
+			}
+			continue
+		}
+
 		job, err := store.ClaimJob(ctx, pool)
 
 		if errors.Is(err, store.ErrorNoJobAvailable) {
