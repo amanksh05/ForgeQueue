@@ -60,7 +60,9 @@ func FailJob(
 				ELSE available_at
 			END,
 			status = $2,
-			last_error = $3
+			last_error = $3,
+			claim_token = NULL,
+			lease_expires_at = NULL
 		WHERE id = $4
 			AND claim_token = $5
 			AND status = 'running'

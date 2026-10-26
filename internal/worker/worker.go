@@ -3,7 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/amanksh05/forgeQueue/internal/store"
@@ -19,6 +19,7 @@ const (
 func wait(ctx context.Context, duration time.Duration) bool {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+
 	select {
 	case <-timer.C:
 		return true
@@ -28,16 +29,27 @@ func wait(ctx context.Context, duration time.Duration) bool {
 }
 
 func RunWorker(ctx context.Context, pool *pgxpool.Pool) {
+	logger := slog.Default()
 	errorWait := pollInterval
+
+	logger.Info("Worker started")
+
+	defer logger.Info("Worker stopped")
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
 		err := store.RecoverExpiredJobs(ctx, pool)
-
 		if err != nil {
-			log.Printf("Failed to recover expired jobs: %v", err)
+			if ctx.Err() != nil {
+				return
+			}
+
+			logger.Error("Failed to recover expired jobs",
+				"error", err,
+			)
 
 			if !wait(ctx, errorWait) {
 				return
@@ -54,55 +66,91 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool) {
 
 		if errors.Is(err, store.ErrorNoJobAvailable) {
 			errorWait = pollInterval
+
 			if !wait(ctx, pollInterval) {
 				return
 			}
 			continue
 		}
+
 		if err != nil {
-			log.Printf("Error claim_job: %v", err)
+			if ctx.Err() != nil {
+				return
+			}
+
+			logger.Error("Failed to claim job",
+				"error", err,
+			)
+
 			if !wait(ctx, errorWait) {
 				return
 			}
+
 			errorWait *= 2
 			if errorWait > maxErrorWait {
 				errorWait = maxErrorWait
 			}
 			continue
 		}
+
 		errorWait = pollInterval
 
-		log.Printf("Claimed job id=%s type=%s", job.ID, job.Type)
+		logger.Info("Job claimed",
+			"job_id", job.ID,
+			"job_type", job.Type,
+			"attempt", job.AttemptCount,
+			"max_attempts", job.MaxAttempts,
+		)
 
-		if executionErr := ExecuteJob(ctx, job); executionErr != nil {
-			log.Printf("Job execution failed: %v", executionErr)
+		startedAt := time.Now()
+		executionErr := ExecuteJob(ctx, job)
+		duration := time.Since(startedAt)
+
+		if executionErr != nil {
+			logger.Warn("Job execution failed",
+				"job_id", job.ID,
+				"job_type", job.Type,
+				"attempt", job.AttemptCount,
+				"duration", duration,
+				"error", executionErr,
+			)
+
 			if err := store.FailJob(ctx, pool, job, executionErr); err != nil {
-				log.Printf(
-					"Failed to record job failure: id=%s error=%v",
-					job.ID,
-					err,
+				logger.Error("Failed to record job failure",
+					"job_id", job.ID,
+					"error", err,
 				)
 			}
 
 			continue
 		}
 
+		jobID := job.ID
+		jobType := job.Type
+
 		job, err = store.UpdateJobStatus(ctx, pool, job)
 
 		if errors.Is(err, pgx.ErrNoRows) {
-			log.Printf(
-				"Worker claim is not valid: id=%s",
-				job.ID,
+			logger.Warn("Job completion rejected; claim or lease is no longer valid",
+				"job_id", jobID,
+				"job_type", jobType,
 			)
 			continue
 		}
 
 		if err != nil {
-			log.Printf("Failed to update job status. Error: %v", err)
+			logger.Error("Failed to mark job as succeeded",
+				"job_id", jobID,
+				"job_type", jobType,
+				"error", err,
+			)
 			continue
 		}
 
-		log.Printf("Job execution successful! id=%s type=%s", job.ID, job.Type)
-
+		logger.Info("Job completed successfully",
+			"job_id", job.ID,
+			"job_type", job.Type,
+			"duration", duration,
+		)
 	}
 }

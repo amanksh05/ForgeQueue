@@ -10,7 +10,6 @@ import (
 	"github.com/amanksh05/forgeQueue/internal/store"
 )
 
-
 type SleepPayloadStruct struct {
 	DurationSeconds int `json:"duration_seconds"`
 }
@@ -24,7 +23,7 @@ type FailOncePayloadStruct struct {
 }
 
 func DispatchFail(job store.Job) error {
-    return fmt.Errorf("intentional failure for job %s", job.ID)
+	return fmt.Errorf("intentional failure for job %s", job.ID)
 }
 
 func DispatchEcho(job store.Job) error {
@@ -93,7 +92,7 @@ func ExecuteJob(ctx context.Context, job store.Job) error {
 		return DispatchFailOnce(job)
 
 	case "fail":
-    	return DispatchFail(job)
+		return DispatchFail(job)
 
 	default:
 		return fmt.Errorf("Invalid Job Type!!!")

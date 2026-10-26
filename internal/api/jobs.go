@@ -1,13 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -18,20 +17,26 @@ import (
 )
 
 func generateFingerPrint(payload []byte, jobType string) (string, error) {
-	var buffer bytes.Buffer
-	err := json.Compact(&buffer, payload)
-	if err != nil {
-		log.Printf("Unable to normalize the JSON: %v", err)
+	var value any
+
+	if err := json.Unmarshal(payload, &value); err != nil {
 		return "", err
 	}
-	normalized := buffer.Bytes()
+
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+
 	combined := jobType + ":" + string(normalized)
-	fingerPrint := sha256.Sum256([]byte(combined))
-	return hex.EncodeToString(fingerPrint[:]), nil
+	fingerprint := sha256.Sum256([]byte(combined))
+
+	return hex.EncodeToString(fingerprint[:]), nil
 }
 
 func CreateJob(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		logger := slog.Default()
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var request struct {
 			Type    string          `json:"type"`
@@ -125,7 +130,10 @@ func CreateJob(pool *pgxpool.Pool) http.HandlerFunc {
 				)
 
 				if err != nil {
-					log.Printf("Failed to retrieve existing job: %v", err)
+					logger.Error("Failed to retrieve existing job",
+						"operation", "retrieve_existing_job",
+						"error", err,
+					)
 					http.Error(w, "Failed to retrieve existing job",
 						http.StatusInternalServerError)
 					return
@@ -152,7 +160,11 @@ func CreateJob(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err != nil {
-			log.Printf("Failed to create job: %v", err)
+			logger.Error("Failed to create job",
+				"operation", "create_job",
+				"idempotency_enabled", idempotencyKey != "",
+				"error", err,
+			)
 			http.Error(w, "Failed to create job",
 				http.StatusInternalServerError)
 			return
