@@ -184,6 +184,98 @@ if [[ -n "$IDEMPOTENCY_ID" ]]; then
 		fail "Conflicting idempotency request failed"
 	fi
 fi
+header "List jobs"
+
+header "Concurrent idempotency"
+
+CONCURRENT_KEY="forgequeue-concurrent-${MARKER}"
+CONCURRENT_PAYLOAD="{\"message\":\"concurrent idempotency test\",\"_forgequeue_test_fixture\":\"$MARKER\"}"
+CONCURRENT_REQUESTS=10
+CONCURRENT_DIR="$TMP/concurrent"
+mkdir -p "$CONCURRENT_DIR"
+
+# Launch all requests before collecting their results.
+for i in $(seq 1 "$CONCURRENT_REQUESTS"); do
+	(
+		CODE="$(curl -sS --connect-timeout 3 --max-time 15 \
+			-o "$CONCURRENT_DIR/body_$i" \
+			-w '%{http_code}' \
+			-X POST "$BASE_URL/jobs" \
+			-H 'Content-Type: application/json' \
+			-H "Idempotency-Key: $CONCURRENT_KEY" \
+			-d "{\"type\":\"echo\",\"payload\":$CONCURRENT_PAYLOAD}" \
+			2>"$CONCURRENT_DIR/error_$i")" || CODE=000
+
+		printf '%s\n' "$CODE" >"$CONCURRENT_DIR/code_$i"
+	) &
+done
+
+# Wait for every background request to finish.
+wait
+
+# Check that every request succeeded and returned a job ID.
+CONCURRENT_IDS="$TMP/concurrent_ids"
+: >"$CONCURRENT_IDS"
+CONCURRENT_BAD=0
+
+for i in $(seq 1 "$CONCURRENT_REQUESTS"); do
+	CODE="$(cat "$CONCURRENT_DIR/code_$i" 2>/dev/null || echo 000)"
+	BODY="$CONCURRENT_DIR/body_$i"
+
+	ID="$(
+		python3 - "$BODY" <<'PY'
+import json,sys
+try:
+    data=json.load(open(sys.argv[1], encoding="utf-8"))
+    print(data.get("id", ""))
+except Exception:
+    print("")
+PY
+	)"
+
+	if [[ ("$CODE" == 200 || "$CODE" == 202) && -n "$ID" ]]; then
+		printf '%s\n' "$ID" >>"$CONCURRENT_IDS"
+	else
+		CONCURRENT_BAD=$((CONCURRENT_BAD + 1))
+		echo "[WARN] Concurrent request $i returned HTTP $CODE or no job ID"
+		cat "$BODY" 2>/dev/null || true
+		echo
+	fi
+done
+
+if [[ "$CONCURRENT_BAD" == 0 ]] &&
+	[[ "$(wc -l <"$CONCURRENT_IDS" | tr -d '[:space:]')" == "$CONCURRENT_REQUESTS" ]]; then
+	pass "All concurrent requests returned successful responses and job IDs"
+else
+	fail "Some concurrent idempotency requests failed"
+fi
+
+# All successful responses must identify the same job.
+UNIQUE_IDS="$(sort -u "$CONCURRENT_IDS" | wc -l | tr -d '[:space:]')"
+
+if [[ "$CONCURRENT_BAD" == 0 && "$UNIQUE_IDS" == 1 ]]; then
+	pass "Concurrent requests all returned the same job ID"
+else
+	fail "Concurrent requests returned $UNIQUE_IDS distinct job IDs"
+	sort -u "$CONCURRENT_IDS"
+fi
+
+# The database must contain exactly one row for this idempotency key.
+if CONCURRENT_COUNT="$(psql "$DB_CONN" -v ON_ERROR_STOP=1 -tA \
+	-c "SELECT COUNT(*) FROM jobs WHERE idempotency_key = '$CONCURRENT_KEY';" \
+	2>"$TMP/concurrent_db_err")"; then
+
+	CONCURRENT_COUNT="$(echo "$CONCURRENT_COUNT" | tr -d '[:space:]')"
+
+	if [[ "$CONCURRENT_COUNT" == "1" ]]; then
+		pass "Concurrent requests created exactly one database row"
+	else
+		fail "Expected one row for concurrent key; found ${CONCURRENT_COUNT:-unknown}"
+	fi
+else
+	fail "Could not verify concurrent idempotency row count"
+	cat "$TMP/concurrent_db_err"
+fi
 
 # Test 4: Verify PostgreSQL contains exactly one job for this key.
 if IDEMPOTENCY_COUNT="$(psql "$DB_CONN" -v ON_ERROR_STOP=1 -tA \
