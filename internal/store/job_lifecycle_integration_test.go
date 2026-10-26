@@ -335,3 +335,135 @@ func TestUpdateJobStatus_RejectsExpiredLease(t *testing.T) {
 		t.Errorf("status = %q, want running because an expired lease must not complete the job", status)
 	}
 }
+
+func TestRecoverExpiredJobs_ClaimableAfterRecovery(t *testing.T) {
+	pool := lifecycleTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	oldToken := uuid.New()
+	id := insertLifecycleTestJob(
+		t, ctx, pool, "running", 1, 3,
+		0, -time.Minute, oldToken,
+	)
+
+	if err := RecoverExpiredJobs(ctx, pool); err != nil {
+		t.Fatalf("RecoverExpiredJobs: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM jobs WHERE id = $1`, id,
+	).Scan(&status); err != nil {
+		t.Fatalf("read recovered job status: %v", err)
+	}
+	if status != "retry_wait" {
+		t.Fatalf("recovered status = %q, want retry_wait", status)
+	}
+
+	// Make the test job immediately eligible for claiming.
+	if _, err := pool.Exec(ctx,
+		`UPDATE jobs SET available_at = NOW() WHERE id = $1`, id,
+	); err != nil {
+		t.Fatalf("make recovered job available: %v", err)
+	}
+
+	claimed, err := ClaimJob(ctx, pool)
+	if err != nil {
+		t.Fatalf("claim recovered job: %v", err)
+	}
+
+	if claimed.ID != id.String() {
+		t.Fatalf(
+			"claimed job ID = %s, want %s; use a dedicated test database with no other ready jobs",
+			claimed.ID, id,
+		)
+	}
+	if claimed.Status != "running" {
+		t.Errorf("status = %q, want running", claimed.Status)
+	}
+	if claimed.AttemptCount != 2 {
+		t.Errorf("attempt_count = %d, want 2", claimed.AttemptCount)
+	}
+	if claimed.ClaimToken == uuid.Nil {
+		t.Error("new claim token should not be nil")
+	}
+	if claimed.ClaimToken == oldToken {
+		t.Error("reclaimed job should have a new claim token")
+	}
+	if !claimed.LeaseExpiresAt.After(time.Now()) {
+		t.Errorf("new lease should be in the future, got %v", claimed.LeaseExpiresAt)
+	}
+}
+
+func TestClaimJob_ConcurrentWorkersClaimDifferentJobs(t *testing.T) {
+	pool := lifecycleTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Make these the oldest available jobs in the dedicated test database.
+	id1 := insertLifecycleTestJob(
+		t, ctx, pool, "queued", 0, 3,
+		-time.Hour, 0, uuid.Nil,
+	)
+	id2 := insertLifecycleTestJob(
+		t, ctx, pool, "queued", 0, 3,
+		-time.Hour+time.Second, 0, uuid.Nil,
+	)
+
+	start := make(chan struct{})
+	type result struct {
+		job Job
+		err error
+	}
+	results := make(chan result, 2)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			job, err := ClaimJob(ctx, pool)
+			results <- result{job: job, err: err}
+		}()
+	}
+
+	// Release both callers together to exercise concurrent claims.
+	close(start)
+
+	first := <-results
+	second := <-results
+
+	if first.err != nil {
+		t.Fatalf("first ClaimJob: %v", first.err)
+	}
+	if second.err != nil {
+		t.Fatalf("second ClaimJob: %v", second.err)
+	}
+
+	if first.job.ID == second.job.ID {
+		t.Fatalf("both workers claimed the same job: %s", first.job.ID)
+	}
+
+	expectedIDs := map[string]bool{
+		id1.String(): true,
+		id2.String(): true,
+	}
+	if !expectedIDs[first.job.ID] {
+		t.Errorf("first worker claimed unexpected job %s", first.job.ID)
+	}
+	if !expectedIDs[second.job.ID] {
+		t.Errorf("second worker claimed unexpected job %s", second.job.ID)
+	}
+
+	if first.job.ClaimToken == second.job.ClaimToken {
+		t.Error("workers should receive distinct claim tokens")
+	}
+
+	for _, job := range []Job{first.job, second.job} {
+		if job.Status != "running" {
+			t.Errorf("job %s status = %q, want running", job.ID, job.Status)
+		}
+		if job.AttemptCount != 1 {
+			t.Errorf("job %s attempt_count = %d, want 1", job.ID, job.AttemptCount)
+		}
+	}
+}
