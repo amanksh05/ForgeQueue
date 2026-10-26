@@ -45,10 +45,11 @@ PY
 	)"
 	[[ -z "$ENV_URL" ]] || DATABASE_URL="$ENV_URL"
 fi
-DB_CONN="${DATABASE_URL:-${DB_URL:-}}"
+DB_CONN="${TEST_DATABASE_URL:-${DB_CONN:-}}"
+
 if [[ -z "$DB_CONN" ]]; then
-	echo "Set DB_URL or DATABASE_URL in .env or environment. No jobs created."
-	exit 1
+    echo "[FAIL] TEST_DATABASE_URL is not configured"
+    exit 1
 fi
 request() {
 	HTTP_CODE="$(curl -sS --connect-timeout 3 --max-time 15 -o "$TMP/body" -w '%{http_code}' "$@" 2>"$TMP/curlerr")" || {
@@ -340,6 +341,82 @@ if [[ -n "$SLEEP_ID" ]]; then
 	[[ "$STATUS" == succeeded ]] && pass "Sleep job reached succeeded" || warn "Final sleep status: ${STATUS:-unknown}"
 	request "$BASE_URL/jobs/$SLEEP_ID" && show
 else warn "Skipped sleep polling"; fi
+
+
+header "Expired-lease recovery"
+
+# Generate the job UUID before inserting the fixture.
+RECOVERY_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+
+# Create a running job with an expired lease and exhausted attempts.
+if psql "$DB_CONN" -v ON_ERROR_STOP=1 -tA -c "
+    INSERT INTO jobs (
+        id,
+        job_type,
+        payload,
+        status,
+        attempt_count,
+        max_attempts,
+        available_at,
+        claim_token,
+        lease_expires_at
+    ) VALUES (
+        '$RECOVERY_ID',
+        'echo',
+        jsonb_build_object(
+            'message', 'lease recovery test',
+            '_forgequeue_test_fixture', '$MARKER'
+        ),
+        'running',
+        3,
+        3,
+        NOW() - INTERVAL '1 minute',
+        gen_random_uuid(),
+        NOW() - INTERVAL '1 minute'
+    );
+" 2>"$TMP/recovery_err"; then
+    pass "Created expired-lease fixture: $RECOVERY_ID"
+else
+    fail "Could not create expired-lease fixture"
+    cat "$TMP/recovery_err"
+    RECOVERY_ID=""
+fi
+
+if [[ -n "$RECOVERY_ID" ]]; then
+    # Wait for the worker to detect and recover the expired lease.
+    RECOVERY_STATE=""
+    for _ in $(seq 1 40); do
+        RECOVERY_STATE="$(
+            psql "$DB_CONN" -v ON_ERROR_STOP=1 -tA -F '|' -c "
+                SELECT
+                    status,
+                    (lease_expires_at IS NULL)::text,
+                    (claim_token IS NULL)::text,
+                    (last_error LIKE '%attempts were exhausted%')::text
+                FROM jobs
+                WHERE id = '$RECOVERY_ID';
+            " 2>"$TMP/recovery_err"
+        )" || {
+            fail "Could not query recovered fixture"
+            cat "$TMP/recovery_err"
+            break
+        }
+
+        [[ "$RECOVERY_STATE" == "dead|true|true|true" ]] && break
+        sleep 0.25
+    done
+
+    if [[ "$RECOVERY_STATE" == "dead|true|true|true" ]]; then
+        pass "Expired lease with exhausted attempts becomes dead"
+        pass "Recovery clears claim token and lease"
+        pass "Recovery records the exhausted-attempts explanation"
+    else
+        fail "Expired lease was not recovered as expected"
+        echo "Observed state: ${RECOVERY_STATE:-unknown}"
+    fi
+fi
+
+
 header "Summary"
 printf 'Passed: %d | Failed: %d | Warnings: %d\n' "$PASS" "$FAIL" "$WARN"
 ((FAIL == 0)) || exit 1
